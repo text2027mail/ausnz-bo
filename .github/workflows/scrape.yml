@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Check out the scraper repo (this repo)
+      # 1. Check out the scraper repo (ausnz-bo)
       - name: Checkout scraper repo
         uses: actions/checkout@v4
 
