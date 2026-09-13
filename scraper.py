@@ -53,9 +53,9 @@ COUNTRIES: Dict[str, Dict] = {
         "tz":           "Pacific/Auckland",
         "hoyts_cinema": "https://apim-aea.hoyts.co.nz/cinemaapi-nz-live/api",
         "hoyts_ticket": "https://apim-aea.hoyts.co.nz/ticketing-nz-live/api/v1",
-        "event_base":   "https://www.eventcinemas.com.nz",
+        "event_base":   "https://www.eventcinemas.co.nz",
         "hoyts_host":   "www.hoyts.co.nz",
-        "event_host":   "www.eventcinemas.com.nz",
+        "event_host":   "www.eventcinemas.co.nz",
     },
 }
 
