@@ -1,0 +1,74 @@
+name: Scrape AU Indian Cinema
+
+on:
+  schedule:
+    # Runs at 02:00 UTC daily (12:00 PM AEST)
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out the scraper repo (this repo)
+      - name: Checkout scraper repo
+        uses: actions/checkout@v4
+
+      # 2. Check out the data repo (ausnz-data) using the PAT
+      - name: Checkout data repo
+        uses: actions/checkout@v4
+        with:
+          repository: text2027mail/ausnz-data
+          token: ${{ secrets.AUSNZ_PAT }}
+          path: data-repo
+
+      # 3. Set up Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 4. Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests cloudscraper brotli
+
+      # 5. Run the scraper
+      #    The script writes into ./australia boxoffice/ and ./australia advance/
+      #    We will move these into the data-repo directory afterwards.
+      - name: Run scraper
+        env:
+          HOYTS_PROXY: ${{ secrets.HOYTS_PROXY }}
+          EVENT_PROXIES: ${{ secrets.EVENT_PROXIES }}
+        run: python aus.py
+
+      # 6. Move generated data into the data repo
+      - name: Move data into data-repo
+        run: |
+          # Create directories if they don't exist
+          mkdir -p "data-repo/australia boxoffice"
+          mkdir -p "data-repo/australia advance"
+
+          # Copy generated files
+          if [ -d "australia boxoffice" ]; then
+            cp -r "australia boxoffice/." "data-repo/australia boxoffice/"
+          fi
+          if [ -d "australia advance" ]; then
+            cp -r "australia advance/." "data-repo/australia advance/"
+          fi
+
+      # 7. Commit and push to the data repo
+      - name: Commit and push
+        run: |
+          cd data-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update data $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
