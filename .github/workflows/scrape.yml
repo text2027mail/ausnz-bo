@@ -3,7 +3,7 @@ name: Scrape AUNZ Indian Cinema
 on:
   schedule:
     # Runs at 02:00 UTC daily (12:00 PM AEST / 2:00 PM NZST)
-    - cron: '0 2 * * *'
+    - cron: '0 */2 * * *'
   workflow_dispatch:
 
 jobs:
