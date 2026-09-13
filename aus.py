@@ -65,9 +65,173 @@ def log(msg: str, level: str = "INFO"):
     print(f"[{ts}] {level:5s} {msg}", flush=True)
 
 
-# ------------------------------------------------------------------
-# 3. Headers
-# ------------------------------------------------------------------
+# ==================================================================
+#  HOYTS  - headers & fetch are EXACTLY from the working scraper
+# ==================================================================
+HOYTS_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+]
+
+HOYTS_LANGS = [
+    "en-AU,en;q=0.9",
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.9",
+]
+
+
+def hoyts_headers() -> Dict[str, str]:
+    """EXACT copy of get_random_headers() from the working scraper."""
+    ua = random.choice(HOYTS_UAS)
+    platform = "Windows"
+    mobile = "?0"
+    if "iPhone" in ua or "iPad" in ua:
+        platform, mobile = "iOS", "?1"
+    elif "Android" in ua:
+        platform, mobile = "Android", "?1"
+    elif "Macintosh" in ua:
+        platform = "macOS"
+    elif "Linux" in ua:
+        platform = "Linux"
+
+    sec_ch_ua = '"Chromium";v="133", "Google Chrome";v="133", "Not-A.Brand";v="24"'
+    m = re.search(r"Firefox/(\d+)", ua)
+    if m:
+        sec_ch_ua = f'"Firefox";v="{m.group(1)}", "Gecko";v="{m.group(1)}"'
+
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": random.choice(HOYTS_LANGS),
+        "Cache-Control": "no-cache",
+        "Origin": "https://www.hoyts.com.au",
+        "Pragma": "no-cache",
+        "Priority": "u=1, i",
+        "Referer": "https://www.hoyts.com.au/",
+        "Sec-CH-UA": sec_ch_ua,
+        "Sec-CH-UA-Mobile": mobile,
+        "Sec-CH-UA-Platform": f'"{platform}"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "User-Agent": ua,
+    }
+
+
+def hoyts_request(url: str) -> Dict:
+    """GET + retry + JSON. Matches the working scraper's flow."""
+    last = None
+    for i in range(RETRIES):
+        try:
+            proxies = None
+            if PROXIES_H:
+                p = random.choice(PROXIES_H)
+                proxies = {"http": p, "https": p}
+            r = requests.get(url, headers=hoyts_headers(),
+                             proxies=proxies, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last = e
+            log(f"HOYTS attempt {i+1}/{RETRIES} failed {url}: {e}", "WARN")
+            if i < RETRIES - 1:
+                time.sleep(BACKOFF * (2 ** i))
+    raise RuntimeError(f"HOYTS GET failed {url}: {last}")
+
+
+def hoyts_fetch_movies() -> List[Dict]:
+    return hoyts_request(f"{HOYTS_CINEMA}/movies")
+
+
+def hoyts_fetch_sessions() -> List[Dict]:
+    data = hoyts_request(f"{HOYTS_CINEMA}/sessions")
+    if isinstance(data, dict):
+        for k in ("sessions", "items", "data"):
+            if k in data and isinstance(data[k], list):
+                return data[k]
+        return []
+    return data if isinstance(data, list) else []
+
+
+def hoyts_fetch_seat_map(cinema_id, session_id) -> Dict:
+    return hoyts_request(f"{HOYTS_TICKET}/ticket/seats/{cinema_id}/{session_id}/")
+
+
+def hoyts_parse_seat_map(seat_map: Dict) -> Tuple[int, int]:
+    total = 0
+    sold = 0
+    for row in seat_map.get("rows", []):
+        for seat in row.get("seats", []):
+            if seat.get("typeId") == "gap":
+                continue
+            total += 1
+            if seat.get("sold", False):
+                sold += 1
+    return total, sold
+
+
+def run_hoyts() -> List[List]:
+    log("HOYTS: fetching movies", "STEP")
+    movies = hoyts_fetch_movies()
+    log(f"HOYTS: {len(movies)} movies total")
+
+    filtered = [m for m in movies
+                if m.get("vistaId") and any(
+                    kw in (m.get("name", "") or "").lower() for kw in KEYWORDS)]
+    log(f"HOYTS: {len(filtered)} Indian-language matches", "OK")
+    if not filtered:
+        return []
+    by_id = {m["vistaId"]: m for m in filtered}
+
+    log("HOYTS: fetching sessions", "STEP")
+    sessions = hoyts_fetch_sessions()
+    log(f"HOYTS: {len(sessions)} sessions total")
+    matched = [s for s in sessions if s.get("movieId") in by_id]
+    log(f"HOYTS: {len(matched)} sessions for matching movies", "OK")
+    if not matched:
+        return []
+
+    log(f"HOYTS: fetching {len(matched)} seat maps", "STEP")
+    results: List[List] = []
+
+    def task(s):
+        try:
+            sm = hoyts_fetch_seat_map(s["cinemaId"], s["id"])
+            total, sold = hoyts_parse_seat_map(sm)
+            return [
+                by_id[s["movieId"]].get("name", ""),   # movie
+                s["id"],                                # id
+                s.get("date", ""),                      # time
+                0.0,                                    # gross
+                total,                                  # seats
+                sold,                                   # sold
+                "H",                                    # source
+            ]
+        except Exception as e:
+            log(f"HOYTS: seat map {s.get('id')} failed: {e}", "WARN")
+            return None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futs = [ex.submit(task, s) for s in matched]
+        for i, f in enumerate(as_completed(futs), 1):
+            r = f.result()
+            if r:
+                results.append(r)
+            if i % 25 == 0 or i == len(futs):
+                log(f"HOYTS: {i}/{len(futs)} seat maps", "DATA")
+
+    log(f"HOYTS: {len(results)} shows OK", "OK")
+    return results
+
+
+# ==================================================================
+#  EVENT CINEMAS
+# ==================================================================
 UAS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
@@ -106,115 +270,6 @@ def build_headers(host: str) -> Dict[str, str]:
     }
 
 
-# ==================================================================
-#  HOYTS
-# ==================================================================
-def hoyts_get(url: str) -> Dict:
-    last = None
-    for i in range(RETRIES):
-        try:
-            proxies = None
-            if PROXIES_H:
-                p = random.choice(PROXIES_H)
-                proxies = {"http": p, "https": p}
-            r = requests.get(url, headers=build_headers("hoyts.com.au"),
-                             proxies=proxies, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            last = e
-            log(f"HOYTS attempt {i+1}/{RETRIES} failed {url}: {e}", "WARN")
-            if i < RETRIES - 1:
-                time.sleep(BACKOFF * (2 ** i))
-    raise RuntimeError(f"HOYTS GET failed {url}: {last}")
-
-
-def hoyts_movies() -> List[Dict]:
-    return hoyts_get(f"{HOYTS_CINEMA}/movies")
-
-
-def hoyts_sessions() -> List[Dict]:
-    d = hoyts_get(f"{HOYTS_CINEMA}/sessions")
-    if isinstance(d, dict):
-        for k in ("sessions", "items", "data"):
-            if isinstance(d.get(k), list):
-                return d[k]
-        return []
-    return d if isinstance(d, list) else []
-
-
-def hoyts_seat_map(cid, sid) -> Dict:
-    return hoyts_get(f"{HOYTS_TICKET}/ticket/seats/{cid}/{sid}/")
-
-
-def parse_hoyts_seats(sm: Dict) -> Tuple[int, int]:
-    total = sold = 0
-    for row in sm.get("rows", []):
-        for seat in row.get("seats", []):
-            if seat.get("typeId") == "gap":
-                continue
-            total += 1
-            if seat.get("sold"):
-                sold += 1
-    return total, sold
-
-
-def run_hoyts() -> List[List]:
-    log("HOYTS: fetching movies", "STEP")
-    movies = hoyts_movies()
-    log(f"HOYTS: {len(movies)} movies total")
-
-    filtered = [m for m in movies
-                if m.get("vistaId") and any(
-                    kw in (m.get("name") or "").lower() for kw in KEYWORDS)]
-    log(f"HOYTS: {len(filtered)} Indian-language matches", "OK")
-    if not filtered:
-        return []
-    by_id = {m["vistaId"]: m for m in filtered}
-
-    log("HOYTS: fetching sessions", "STEP")
-    sessions = hoyts_sessions()
-    matched = [s for s in sessions if s.get("movieId") in by_id]
-    log(f"HOYTS: {len(matched)} sessions for matching movies", "OK")
-    if not matched:
-        return []
-
-    log(f"HOYTS: fetching {len(matched)} seat maps", "STEP")
-    results: List[List] = []
-
-    def task(s):
-        try:
-            sm = hoyts_seat_map(s["cinemaId"], s["id"])
-            total, sold = parse_hoyts_seats(sm)
-            return [
-                by_id[s["movieId"]].get("name", ""),   # movie
-                s["id"],                                # id
-                s.get("date", ""),                      # time
-                0.0,                                    # gross
-                total,                                  # seats
-                sold,                                   # sold
-                "H",                                    # source
-            ]
-        except Exception as e:
-            log(f"HOYTS: seat map {s.get('id')} failed: {e}", "WARN")
-            return None
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futs = [ex.submit(task, s) for s in matched]
-        for i, f in enumerate(as_completed(futs), 1):
-            r = f.result()
-            if r:
-                results.append(r)
-            if i % 25 == 0 or i == len(futs):
-                log(f"HOYTS: {i}/{len(futs)} seat maps", "DATA")
-
-    log(f"HOYTS: {len(results)} shows OK", "OK")
-    return results
-
-
-# ==================================================================
-#  EVENT CINEMAS
-# ==================================================================
 def event_session() -> cloudscraper.CloudScraper:
     try:
         return cloudscraper.create_scraper(
@@ -239,7 +294,7 @@ def event_get(url: str, session) -> Dict:
             if PROXIES_E:
                 p = random.choice(PROXIES_E)
                 proxies = {"http": p, "https": p}
-            r = session.get(url, headers=build_headers("eventcinemas.com.au"),
+            r = session.get(url, headers=build_headers("www.eventcinemas.com.au"),
                             proxies=proxies, timeout=TIMEOUT)
             r.raise_for_status()
             return r.json()
@@ -422,11 +477,6 @@ def run_event() -> List[List]:
 #  STORAGE  (merge + save)
 # ==================================================================
 def merge_and_save(path: str, new_records: List[List]) -> None:
-    """
-    Merge new records into the existing file at `path`.
-    Records are arrays: [movie, id, time, gross, seats, sold, source].
-    Match key = f"{source}:{id}".
-    """
     existing: Dict[str, List] = {}
     if os.path.exists(path):
         try:
@@ -446,7 +496,6 @@ def merge_and_save(path: str, new_records: List[List]) -> None:
         key = f"{rec[IDX_SRC]}:{rec[IDX_ID]}"
         if key in existing:
             old = existing[key]
-            # update only mutable fields; keep the array position intact
             old[IDX_MOVIE] = rec[IDX_MOVIE]
             old[IDX_TIME]  = rec[IDX_TIME]
             old[IDX_GROSS] = rec[IDX_GROSS]
