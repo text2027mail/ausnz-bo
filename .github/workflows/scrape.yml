@@ -52,6 +52,11 @@ jobs:
             fi
           done
 
+      - name: Build per-movie summaries
+        env:
+          DATA_BASE: data-repo
+        run: python build_summaries.py
+
       - name: Commit and push
         run: |
           cd data-repo
@@ -61,6 +66,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update AU+NZ data $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git commit -m "Update AU+NZ data + summaries $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
           fi
