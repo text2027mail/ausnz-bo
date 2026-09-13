@@ -1,7 +1,8 @@
-name: Scrape AU Indian Cinema
+name: Scrape AUNZ Indian Cinema
 
 on:
   schedule:
+    # Runs at 02:00 UTC daily (12:00 PM AEST / 2:00 PM NZST)
     - cron: '0 2 * * *'
   workflow_dispatch:
 
@@ -34,18 +35,22 @@ jobs:
         env:
           HOYTS_PROXY: ${{ secrets.HOYTS_PROXY }}
           EVENT_PROXIES: ${{ secrets.EVENT_PROXIES }}
-        run: python aus.py
+          HOYTS_NZ_PROXY: ${{ secrets.HOYTS_NZ_PROXY }}
+          EVENT_NZ_PROXIES: ${{ secrets.EVENT_NZ_PROXIES }}
+        run: python scraper.py
 
       - name: Move data into data-repo
         run: |
           mkdir -p "data-repo/australia boxoffice"
           mkdir -p "data-repo/australia advance"
-          if [ -d "australia boxoffice" ]; then
-            cp -r "australia boxoffice/." "data-repo/australia boxoffice/"
-          fi
-          if [ -d "australia advance" ]; then
-            cp -r "australia advance/." "data-repo/australia advance/"
-          fi
+          mkdir -p "data-repo/newzealand boxoffice"
+          mkdir -p "data-repo/newzealand advance"
+
+          for d in "australia boxoffice" "australia advance" "newzealand boxoffice" "newzealand advance"; do
+            if [ -d "$d" ]; then
+              cp -r "$d/." "data-repo/$d/"
+            fi
+          done
 
       - name: Commit and push
         run: |
@@ -56,6 +61,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Update data $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git commit -m "Update AU+NZ data $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
           fi
