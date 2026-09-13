@@ -36,8 +36,6 @@ jobs:
           pip install requests cloudscraper brotli
 
       # 5. Run the scraper
-      #    The script writes into ./australia boxoffice/ and ./australia advance/
-      #    We will move these into the data-repo directory afterwards.
       - name: Run scraper
         env:
           HOYTS_PROXY: ${{ secrets.HOYTS_PROXY }}
@@ -47,11 +45,9 @@ jobs:
       # 6. Move generated data into the data repo
       - name: Move data into data-repo
         run: |
-          # Create directories if they don't exist
           mkdir -p "data-repo/australia boxoffice"
           mkdir -p "data-repo/australia advance"
 
-          # Copy generated files
           if [ -d "australia boxoffice" ]; then
             cp -r "australia boxoffice/." "data-repo/australia boxoffice/"
           fi
