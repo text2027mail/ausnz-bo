@@ -55,27 +55,51 @@ COUNTRIES = [
 # ------------------------------------------------------------------
 # Name → slug normalization
 # ------------------------------------------------------------------
+# Tokens that appear at the tail of a title but are really meta info
+# (language, subtitle flag, format, connector). We strip them from the
+# end only — never from the middle — so real titles like "Hindi Medium"
+# stay intact.
+META_TOKENS = {
+    "hindi", "tamil", "telugu", "kannada", "malayalam", "english", "eng",
+    "sub", "subs", "subtitled", "subtitle", "subtitles",
+    "dubbed", "dub", "original", "orig",
+    "with", "in", "language",
+}
+
+
 def normalize_slug(name: str) -> str:
     """
-    Turn a raw movie name into a canonical slug so that
-    'Mirzapur: The Movie (Hindi, Eng Sub)' and 'Mirzapur - The Movie'
-    map to the same key: 'mirzapur-the-movie'.
+    Turn a raw movie name into a canonical slug so that:
+        'Mirzapur: The Movie (Hindi, Eng Sub)'  -> 'mirzapur-the-movie'
+        'Mirzapur - The Movie'                  -> 'mirzapur-the-movie'
+        'Bethlehem Kudumba Unit (Malayalam)'    -> 'bethlehem-kudumba-unit'
+        'Bethlehem Kudumba Unit Malayalam'      -> 'bethlehem-kudumba-unit'
+        'Haiwaan (Hindi, Eng Sub)'              -> 'haiwaan'
     """
     if not name:
         return ""
-    # Strip trailing parenthesized info like "(Hindi, Eng Sub)"
-    name = re.sub(r'\s*\([^)]*\)\s*$', '', name).strip()
-    # Lowercase
+
+    # 1. Remove ALL parenthesized segments, anywhere.
+    name = re.sub(r'\([^)]*\)', ' ', name)
+
+    # 2. Lowercase.
     name = name.lower()
-    # Replace anything that isn't a-z0-9 with a space
+
+    # 3. Replace everything that isn't [a-z0-9] with a space.
     name = re.sub(r'[^a-z0-9]+', ' ', name)
-    # Collapse whitespace and join with hyphens
-    return '-'.join(name.split())
+
+    # 4. Split to tokens and strip trailing meta tokens (repeatedly).
+    tokens = name.split()
+    while tokens and tokens[-1] in META_TOKENS:
+        tokens.pop()
+
+    # 5. Join.
+    return '-'.join(tokens)
 
 
 def pick_display_name(slug_names: Dict[str, int]) -> str:
     """
-    Choose a clean, human-friendly display name from the observed raw names.
+    Choose a clean, human-friendly display name from observed raw names.
     Prefers: no trailing parens, most frequent, shortest, alphabetical.
     """
     cleaned: Dict[str, int] = {}
@@ -123,15 +147,11 @@ def load_country_records(boxoffice_dir: str, advance_dir: str) -> List[List]:
     """
     by_key: Dict[Tuple[str, int], List] = {}
 
-    # Lower priority: advance
     for r in load_records(advance_dir):
-        key = (r[IDX_SRC], r[IDX_ID])
-        by_key[key] = r
+        by_key[(r[IDX_SRC], r[IDX_ID])] = r
 
-    # Higher priority: boxoffice overwrites
     for r in load_records(boxoffice_dir):
-        key = (r[IDX_SRC], r[IDX_ID])
-        by_key[key] = r
+        by_key[(r[IDX_SRC], r[IDX_ID])] = r
 
     return list(by_key.values())
 
@@ -150,12 +170,12 @@ def _empty_stats() -> Dict:
 def _add_to_stats(stats: Dict, src: str, seats: int, sold: int, gross: float):
     stats["shows"] += 1
     stats["seats"] += seats
-    stats["sold"] += sold
+    stats["sold"]  += sold
     stats["gross"] += gross
     if src in ("H", "E"):
         stats[src]["shows"] += 1
         stats[src]["seats"] += seats
-        stats[src]["sold"] += sold
+        stats[src]["sold"]  += sold
         stats[src]["gross"] += gross
 
 
@@ -167,11 +187,6 @@ def _finalize_stats(stats: Dict) -> Dict:
 
 
 def build_movie_summaries(records: List[List]) -> Dict[str, Dict]:
-    """
-    Group records by normalized slug and aggregate:
-      - per-date (daywise) stats
-      - overall totals across every date
-    """
     slug_names: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     slug_days:  Dict[str, Dict[str, Dict]] = defaultdict(
         lambda: defaultdict(_empty_stats)
@@ -209,7 +224,6 @@ def build_movie_summaries(records: List[List]) -> Dict[str, Dict]:
             day_stats = _finalize_stats(days_map[date])
             days_out[date] = day_stats
 
-            # accumulate totals
             totals["shows"] += day_stats["shows"]
             totals["seats"] += day_stats["seats"]
             totals["sold"]  += day_stats["sold"]
@@ -237,7 +251,7 @@ def build_movie_summaries(records: List[List]) -> Dict[str, Dict]:
 def save_summaries(summaries: Dict[str, Dict], out_dir: str) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
-    # Remove stale movie files (files whose slug is no longer present)
+    # Wipe stale movie files so renamed slugs don't linger.
     for fname in os.listdir(out_dir):
         if fname.endswith(".json"):
             try:
