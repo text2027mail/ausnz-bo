@@ -13,7 +13,7 @@ Record (array of values, no keys):
     - movie  : str
     - id     : int
     - time   : ISO string
-    - gross  : float
+    - gross  : float  (sold * ATP, ATP = fixed average ticket price)
     - seats  : int
     - sold   : int
     - source : "H" | "E"
@@ -69,6 +69,10 @@ TIMEOUT         = 30
 RETRIES         = 3
 BACKOFF         = 2.0
 EVENT_WINDOW    = 3          # days per Event movie
+
+# Fixed average ticket price (AUD / NZD).
+# Hoyts' API does not expose pricing, so gross is derived as sold * ATP.
+ATP = 24.0
 
 # Index positions in the output record array
 IDX_MOVIE, IDX_ID, IDX_TIME, IDX_GROSS, IDX_SEATS, IDX_SOLD, IDX_SRC = range(7)
@@ -266,13 +270,13 @@ def run_hoyts(country_key: str) -> List[List]:
             sm = hoyts_fetch_seat_map(s["cinemaId"], s["id"], country_key)
             total, sold = hoyts_parse_seat_map(sm)
             return [
-                by_id[s["movieId"]].get("name", ""),   # movie
-                s["id"],                                # id
-                s.get("date", ""),                      # time
-                0.0,                                    # gross
-                total,                                  # seats
-                sold,                                   # sold
-                "H",                                    # source
+                by_id[s["movieId"]].get("name", ""),        # movie
+                s["id"],                                     # id
+                s.get("date", ""),                           # time
+                round(sold * ATP, 2),                        # gross  (fixed ATP)
+                total,                                       # seats
+                sold,                                        # sold
+                "H",                                         # source
             ]
         except Exception as e:
             log(f"HOYTS[{country_key}]: seat map {s.get('id')} failed: {e}", "WARN")
@@ -404,9 +408,9 @@ def event_seat_map(session, sid: int, country_key: str) -> Dict:
                      session, country_key)
 
 
-def parse_event_seats(sd: Dict) -> Tuple[int, int, float]:
+def parse_event_seats(sd: Dict) -> Tuple[int, int]:
+    """Return (total_seats, sold_seats). Price is not used (gross uses fixed ATP)."""
     total = sold = 0
-    price = 0.0
     rows = ((sd.get("Data") or {}).get("Seats") or {}).get("Rows") or []
     for row in rows:
         for seat in row.get("Seats") or []:
@@ -416,14 +420,7 @@ def parse_event_seats(sd: Dict) -> Tuple[int, int, float]:
             total += 1
             if st == "Booked":
                 sold += 1
-    for t in (sd.get("Data") or {}).get("Tickets") or []:
-        if (t.get("Name") or "").strip().lower() == "adult":
-            try:
-                price = float(t.get("Price") or 0)
-            except (TypeError, ValueError):
-                price = 0.0
-            break
-    return total, sold, price
+    return total, sold
 
 
 def _release_dt(m: Dict, tz) -> Optional[datetime]:
@@ -506,12 +503,12 @@ def run_event(country_key: str) -> List[List]:
         sid = s["sessionId"]
         try:
             sd = event_seat_map(get_session(), sid, country_key)
-            total, sold, price = parse_event_seats(sd)
+            total, sold = parse_event_seats(sd)
             return [
                 m.get("Name", ""),                      # movie
                 sid,                                    # id
                 s.get("startTime", ""),                 # time
-                round(sold * price, 2),                 # gross
+                round(sold * ATP, 2),                   # gross  (fixed ATP)
                 total,                                  # seats
                 sold,                                   # sold
                 "E",                                    # source
@@ -584,6 +581,7 @@ def merge_and_save(path: str, new_records: List[List]) -> None:
 def main():
     started = time.time()
     log("Merged AU+NZ scraper starting", "STEP")
+    log(f"Fixed average ticket price (ATP): {ATP}")
 
     for country_key in ("AU", "NZ"):
         cfg = COUNTRIES[country_key]
