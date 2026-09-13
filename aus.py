@@ -6,9 +6,15 @@ Output:
     australia boxoffice/YYYY/MM-DD.json   -> today's shows
     australia advance/YYYY/MM-DD.json     -> future shows
 
-Record:
-    {"movie": str, "id": int, "time": ISO, "gross": float,
-     "seats": int, "sold": int, "source": "H"|"E"}
+Record (array of values, no keys):
+    [movie, id, time, gross, seats, sold, source]
+    - movie  : str
+    - id     : int
+    - time   : ISO string
+    - gross  : float
+    - seats  : int
+    - sold   : int
+    - source : "H" | "E"
 """
 import json, os, random, re, sys, threading, time
 from collections import defaultdict
@@ -46,6 +52,9 @@ PROXY_H  = os.environ.get("HOYTS_PROXY", "").strip()
 PROXY_E  = [p.strip() for p in os.environ.get("EVENT_PROXIES", "").split(",") if p.strip()]
 PROXIES_H = [PROXY_H] if PROXY_H else []
 PROXIES_E = PROXY_E
+
+# Index positions in the output record array
+IDX_MOVIE, IDX_ID, IDX_TIME, IDX_GROSS, IDX_SEATS, IDX_SOLD, IDX_SRC = range(7)
 
 
 # ------------------------------------------------------------------
@@ -150,7 +159,7 @@ def parse_hoyts_seats(sm: Dict) -> Tuple[int, int]:
     return total, sold
 
 
-def run_hoyts() -> List[Dict]:
+def run_hoyts() -> List[List]:
     log("HOYTS: fetching movies", "STEP")
     movies = hoyts_movies()
     log(f"HOYTS: {len(movies)} movies total")
@@ -171,21 +180,21 @@ def run_hoyts() -> List[Dict]:
         return []
 
     log(f"HOYTS: fetching {len(matched)} seat maps", "STEP")
-    results: List[Dict] = []
+    results: List[List] = []
 
     def task(s):
         try:
             sm = hoyts_seat_map(s["cinemaId"], s["id"])
             total, sold = parse_hoyts_seats(sm)
-            return {
-                "movie":  by_id[s["movieId"]].get("name", ""),
-                "id":     s["id"],
-                "time":   s.get("date", ""),
-                "gross":  0.0,
-                "seats":  total,
-                "sold":   sold,
-                "source": "H",
-            }
+            return [
+                by_id[s["movieId"]].get("name", ""),   # movie
+                s["id"],                                # id
+                s.get("date", ""),                      # time
+                0.0,                                    # gross
+                total,                                  # seats
+                sold,                                   # sold
+                "H",                                    # source
+            ]
         except Exception as e:
             log(f"HOYTS: seat map {s.get('id')} failed: {e}", "WARN")
             return None
@@ -344,7 +353,7 @@ def collect_event_sessions(session, movie: Dict, cinemas: List[int],
     return out
 
 
-def run_event() -> List[Dict]:
+def run_event() -> List[List]:
     log("EVENT: fetching movies", "STEP")
     main = event_session()
     all_movies = event_all_movies(main)
@@ -376,22 +385,22 @@ def run_event() -> List[Dict]:
         return tl.s
 
     log(f"EVENT: fetching {len(tasks)} seat maps", "STEP")
-    results: List[Dict] = []
+    results: List[List] = []
 
     def task(m, s):
         sid = s["sessionId"]
         try:
             sd = event_seat_map(get_session(), sid)
             total, sold, price = parse_event_seats(sd)
-            return {
-                "movie":  m.get("Name", ""),
-                "id":     sid,
-                "time":   s.get("startTime", ""),
-                "gross":  round(sold * price, 2),
-                "seats":  total,
-                "sold":   sold,
-                "source": "E",
-            }
+            return [
+                m.get("Name", ""),                      # movie
+                sid,                                    # id
+                s.get("startTime", ""),                 # time
+                round(sold * price, 2),                 # gross
+                total,                                  # seats
+                sold,                                   # sold
+                "E",                                    # source
+            ]
         except Exception as e:
             log(f"EVENT: seat map {sid} failed: {e}", "WARN")
             return None
@@ -412,31 +421,37 @@ def run_event() -> List[Dict]:
 # ==================================================================
 #  STORAGE  (merge + save)
 # ==================================================================
-def merge_and_save(path: str, new_records: List[Dict]) -> None:
-    existing: Dict[str, Dict] = {}
+def merge_and_save(path: str, new_records: List[List]) -> None:
+    """
+    Merge new records into the existing file at `path`.
+    Records are arrays: [movie, id, time, gross, seats, sold, source].
+    Match key = f"{source}:{id}".
+    """
+    existing: Dict[str, List] = {}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
                 for r in data:
-                    if r.get("id") is not None and r.get("source"):
-                        existing[f"{r['source']}:{r['id']}"] = r
+                    if isinstance(r, list) and len(r) >= 7:
+                        key = f"{r[IDX_SRC]}:{r[IDX_ID]}"
+                        existing[key] = r
         except Exception as e:
             log(f"Read failed {path}: {e} — starting fresh", "WARN")
             existing = {}
 
     added = updated = 0
     for rec in new_records:
-        key = f"{rec['source']}:{rec['id']}"
+        key = f"{rec[IDX_SRC]}:{rec[IDX_ID]}"
         if key in existing:
             old = existing[key]
-            # replace only the mutable fields; leave the record in place
-            old["movie"] = rec["movie"]
-            old["time"]  = rec["time"]
-            old["gross"] = rec["gross"]
-            old["seats"] = rec["seats"]
-            old["sold"]  = rec["sold"]
+            # update only mutable fields; keep the array position intact
+            old[IDX_MOVIE] = rec[IDX_MOVIE]
+            old[IDX_TIME]  = rec[IDX_TIME]
+            old[IDX_GROSS] = rec[IDX_GROSS]
+            old[IDX_SEATS] = rec[IDX_SEATS]
+            old[IDX_SOLD]  = rec[IDX_SOLD]
             updated += 1
         else:
             existing[key] = rec
@@ -444,8 +459,8 @@ def merge_and_save(path: str, new_records: List[Dict]) -> None:
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(list(existing.values()), f,
-                  separators=(",", ":"), ensure_ascii=False)
+        json.dump(list(existing.values()), f, separators=(",", ":"),
+                  ensure_ascii=False)
     log(f"{path}: +{added} new, ~{updated} updated, total {len(existing)}", "OK")
 
 
@@ -458,7 +473,7 @@ def main():
     today = datetime.now(AU_TZ).strftime("%Y-%m-%d")
     log(f"Reference today (AU/Sydney): {today}")
 
-    records: List[Dict] = []
+    records: List[List] = []
 
     try:
         records += run_hoyts()
@@ -474,9 +489,9 @@ def main():
         log("No new records fetched — existing files left untouched.", "WARN")
         return
 
-    by_date: Dict[str, List[Dict]] = defaultdict(list)
+    by_date: Dict[str, List[List]] = defaultdict(list)
     for r in records:
-        d = (r.get("time") or "").split("T")[0]
+        d = (r[IDX_TIME] or "").split("T")[0]
         if d:
             by_date[d].append(r)
 
